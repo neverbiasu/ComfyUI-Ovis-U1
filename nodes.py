@@ -4,6 +4,7 @@ import numpy as np
 import random
 from typing import Tuple, List
 from PIL import Image
+import shutil # Add this import
 
 # ComfyUI related imports
 from folder_paths import folder_names_and_paths, models_dir as comfy_models_dir, get_folder_paths
@@ -31,7 +32,7 @@ if "ovis" not in folder_names_and_paths:
 
 # Constants
 SUPPORTED_MODELS = ["AIDC-AI/Ovis-U1-3B"]
-REQUIRED_FILES = ["config.json", "generation_config.json", "tokenizer_config.json", "tokenizer.json"]
+REQUIRED_FILES = ["config.json", "tokenizer_config.json", "tokenizer.json"] # Removed "generation_config.json"
 WEIGHT_FILES = ["pytorch_model.bin", "model.safetensors", "pytorch_model.safetensors"]
 
 # Download configuration - set to False to disable automatic downloads
@@ -67,8 +68,9 @@ def check_model_files_safe(model_path: str) -> Tuple[bool, List[str], List[str]]
     weight_found = False
 
     if not os.path.exists(model_path):
-        return False, REQUIRED_FILES, WEIGHT_FILES
+        return False, REQUIRED_FILES, ["model.safetensors.index.json"] # Indicate index is missing if dir doesn't exist
 
+    # Check required config files
     for file in REQUIRED_FILES:
         file_path = os.path.join(model_path, file)
         try:
@@ -77,33 +79,47 @@ def check_model_files_safe(model_path: str) -> Tuple[bool, List[str], List[str]]
                 continue
             file_size = os.path.getsize(file_path)
             if file_size == 0:
-                missing_required.append(file)
+                missing_required.append(f"{file} (empty)") # Add (empty) for clarity
                 continue
         except (OSError, IOError, PermissionError) as e:
             missing_required.append(f"{file} (access error: {e})")
             continue
 
-    for weight_file in WEIGHT_FILES:
-        weight_path = os.path.join(model_path, weight_file)
-        try:
-            if os.path.exists(weight_path):
-                file_size = os.path.getsize(weight_path)
-                if file_size > 100 * 1024 * 1024:  # 100MB
-                    weight_found = True
-                    break
-                else:
-                    missing_weights.append(f"{weight_file} (too small)")
-        except (OSError, IOError, PermissionError) as e:
-            missing_weights.append(f"{weight_file} (access error: {e})")
-            continue
+    # Check for weight files (sharded safetensors and index)
+    index_file_path = os.path.join(model_path, "model.safetensors.index.json")
+    if not os.path.exists(index_file_path):
+        missing_weights.append("model.safetensors.index.json")
+    else:
+        # If index exists, check for at least one large safetensors file
+        safetensors_files = [f for f in os.listdir(model_path) if f.endswith(".safetensors")]
+        for weight_file in safetensors_files:
+             weight_path = os.path.join(model_path, weight_file)
+             try:
+                 file_size = os.path.getsize(weight_path)
+                 if file_size > 100 * 1024 * 1024:  # 100MB
+                     weight_found = True
+                     break # Found at least one large weight file
+                 else:
+                     # Only report small files if no large one is found
+                     if not weight_found:
+                         missing_weights.append(f"{weight_file} (too small)")
+             except (OSError, IOError, PermissionError) as e:
+                 if not weight_found:
+                     missing_weights.append(f"{weight_file} (access error: {e})")
+                 continue
 
-    if not weight_found:
-        current_missing_weight_names = [item.split(' ')[0] for item in missing_weights if 'access error' not in item]
-        for weight_file in WEIGHT_FILES:
-            if weight_file not in current_missing_weight_names and f"{weight_file} (access error" not in ' '.join(missing_weights):
-                 missing_weights.append(weight_file)
+        if not weight_found and not missing_weights:
+             # If index exists but no safetensors files found or checked
+             missing_weights.append("No large .safetensors files found")
 
+
+    # Determine overall success
+    # Success if no required files are missing AND weight files are found (index exists and at least one large safetensors)
     success = not missing_required and weight_found
+
+    # Refine missing_weights list if weight_found is True but some small files were added
+    if weight_found and missing_weights:
+        missing_weights = [item for item in missing_weights if "too small" not in item and "access error" not in item]
 
     return success, missing_required, missing_weights
 
@@ -155,31 +171,89 @@ def pre_check_requirements() -> bool:
 
 def ensure_model_available(repo_name: str) -> str:
     """Ensure model is available, with controlled auto-download."""
+    global shutil # Add this line
     local_path = get_local_model_path(repo_name)
 
+    # First check if model is already available locally
     success, missing_required, missing_weights = check_model_files_safe(local_path)
 
     if success:
+        print(f"Model found at: {local_path}")
         return local_path
 
-    if not ENABLE_AUTO_DOWNLOAD:
-        raise RuntimeError(f"Model not available and auto-download disabled: {repo_name}")
+    # Model not found locally
+    print(f"Model not found locally: {repo_name}")
 
+    # Auto-download is enabled - attempt download
+    print(f"Attempting to download: {repo_name}")
+
+    # Pre-check requirements (without network check to avoid crashes)
     if not TRANSFORMERS_AVAILABLE:
         raise RuntimeError("transformers not available")
     if not HF_HUB_AVAILABLE:
         raise RuntimeError("huggingface_hub not available")
 
+    # Attempt download with proper error handling
     try:
-        progress_bar = ProgressBar(100)
-        ok = download_model(repo_name, local_path, progress_bar)
-        success_after_download, _, _ = check_model_files_safe(local_path)
-        if ok and success_after_download:
+        # Create a simple progress tracking
+        print(f"Starting download of {repo_name}...")
+
+        # Use snapshot_download directly with error handling
+        from huggingface_hub import snapshot_download
+
+        # Try to get token from environment
+        token = os.environ.get("HF_TOKEN", None)
+
+        # Create directory if it doesn't exist
+        os.makedirs(local_path, exist_ok=True)
+
+        # Download with minimal options to reduce failure points
+        snapshot_download(
+            repo_id=repo_name,
+            local_dir=local_path,
+            local_dir_use_symlinks=False,
+            resume_download=True,
+            token=token,
+            force_download=False,
+            ignore_patterns=["*.msgpack", "*.h5", "*.ot", "*.md"]
+        )
+
+        # Verify download
+        success_after_download, missing_required_after, missing_weights_after = check_model_files_safe(local_path)
+        if success_after_download:
+            print(f"Download completed successfully: {local_path}")
             return local_path
         else:
-            raise RuntimeError(f"Model not available after download attempt: {repo_name}")
+            # Clean up incomplete download
+            if os.path.exists(local_path):
+                shutil.rmtree(local_path, ignore_errors=True)
+
+            error_details = []
+            if missing_required_after:
+                error_details.append(f"Missing required files: {', '.join(missing_required_after)}")
+            if missing_weights_after:
+                error_details.append(f"Missing or incomplete weight files: {', '.join(missing_weights_after)}")
+
+            error_msg = f"Download verification failed for {repo_name}. " + " ".join(error_details)
+            raise RuntimeError(error_msg)
+
     except Exception as download_error:
-        raise RuntimeError(f"Failed to download {repo_name}: {str(download_error)}")
+        print(f"Download failed: {str(download_error)}")
+
+        # Clean up on failure
+        if os.path.exists(local_path):
+            shutil.rmtree(local_path, ignore_errors=True)
+
+        # Provide helpful error messages
+        error_msg = f"Failed to download {repo_name}: {str(download_error)}"
+        if "401" in str(download_error) or "Unauthorized" in str(download_error):
+            error_msg += "\nAuthentication required. Please set HF_TOKEN environment variable."
+        elif "timeout" in str(download_error).lower():
+            error_msg += "\nNetwork timeout. Please check your connection."
+        elif "interpreter shutdown" in str(download_error):
+            error_msg += "\nDownload interrupted due to system shutdown."
+
+        raise RuntimeError(error_msg)
 
 
 def comfy_to_pil(image_tensor) -> Image.Image:
@@ -257,11 +331,17 @@ def create_blank_image(width: int, height: int) -> Image.Image:
 def build_model_inputs(model, text_tokenizer, visual_tokenizer, prompt: str, pil_image: Image.Image, 
                       target_width=None, target_height=None):
     """Build model inputs from prompt and image."""
+    # Accept both OvisModelWrapper and raw model
+    # If model is a wrapper, extract the real model and device
+    real_model = getattr(model, 'model', model)
+    model_device = getattr(model, 'device', getattr(real_model, 'device', 'cpu'))
+    model_dtype = getattr(real_model, 'dtype', torch.float32)
+
     if pil_image is not None and target_width is not None and target_height is not None:
         target_size = (int(target_width), int(target_height))
-        pil_image, vae_pixel_values, cond_img_ids = model.visual_generator.process_image_aspectratio(pil_image, target_size)
+        pil_image, vae_pixel_values, cond_img_ids = real_model.visual_generator.process_image_aspectratio(pil_image, target_size)
         cond_img_ids[..., 0] = 1.0
-        vae_pixel_values = vae_pixel_values.unsqueeze(0).to(device=model.device)
+        vae_pixel_values = vae_pixel_values.unsqueeze(0).to(device=model_device, dtype=model_dtype)
         width = pil_image.width
         height = pil_image.height
         resized_height, resized_width = visual_tokenizer.smart_resize(height, width, max_pixels=visual_tokenizer.image_processor.min_pixels)
@@ -269,29 +349,30 @@ def build_model_inputs(model, text_tokenizer, visual_tokenizer, prompt: str, pil
     else:
         vae_pixel_values = None
 
-    prompt, input_ids, pixel_values, grid_thws = model.preprocess_inputs(
-        prompt, 
-        [pil_image], 
+    prompt, input_ids, pixel_values, grid_thws = real_model.preprocess_inputs(
+        prompt,
+        [pil_image],
         generation_preface=None,
         return_labels=False,
         propagate_exception=False,
         multimodal_type='single_image',
         fix_sample_overall_length_navit=False
     )
-    
+
     attention_mask = torch.ne(input_ids, text_tokenizer.pad_token_id)
-    input_ids = input_ids.unsqueeze(0).to(device=model.device)
-    attention_mask = attention_mask.unsqueeze(0).to(device=model.device)
-    
+
+    input_ids = input_ids.unsqueeze(0).to(device=model_device)
+    attention_mask = attention_mask.unsqueeze(0).to(device=model_device)
+
     if pixel_values is not None:
         pixel_values = torch.cat([
-            pixel_values.to(device=visual_tokenizer.device, dtype=torch.bfloat16)
+            pixel_values.to(device=visual_tokenizer.device, dtype=model_dtype)
         ], dim=0)
     if grid_thws is not None:
         grid_thws = torch.cat([
-            grid_thws.to(device=visual_tokenizer.device)
+            grid_thws.to(device=visual_tokenizer.device, dtype=model_dtype)
         ], dim=0)
-    
+
     return input_ids, pixel_values, attention_mask, grid_thws, vae_pixel_values
 
 
@@ -624,7 +705,6 @@ class OvisU1ImageEdit:
             raise Exception(error_msg) from e
 
 
-# Node registration mappings
 NODE_CLASS_MAPPINGS = {
     "OvisU1ModelLoader": OvisU1ModelLoader,
     "OvisU1TextToImage": OvisU1TextToImage,
@@ -639,5 +719,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OvisU1ImageToText": "Ovis-U1 Image to Text",
 }
 
-# Export for ComfyUI
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
