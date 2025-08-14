@@ -325,94 +325,97 @@ def create_blank_image(width: int, height: int) -> Image.Image:
     """Create a blank white image."""
     return Image.new("RGB", (width, height), (255, 255, 255))
 
+def get_ovis_tokenizers(model):
+    """
+    Utility to get text and visual tokenizers from the raw Ovis-U1 model.
+    Raises an exception if not available.
+    """
+    if model is None:
+        raise Exception("Model is None. Please load the model first.")
+    if not hasattr(model, 'get_text_tokenizer') or not hasattr(model, 'get_visual_tokenizer'):
+        raise Exception("Model does not provide tokenizer accessors. Please check model version.")
+    text_tokenizer = model.get_text_tokenizer()
+    visual_tokenizer = model.get_visual_tokenizer()
+    if text_tokenizer is None or visual_tokenizer is None:
+        raise Exception("Model tokenizers are None. Model may not be properly loaded.")
+    return text_tokenizer, visual_tokenizer
+
 
 # Model Processing Utilities
 
-def build_model_inputs(model, text_tokenizer, visual_tokenizer, prompt: str, pil_image: Image.Image, 
-                      target_width=None, target_height=None):
-    """Build model inputs from prompt and image."""
-    # Accept both OvisModelWrapper and raw model
-    # If model is a wrapper, extract the real model and device
-    real_model = getattr(model, 'model', model)
-    model_device = getattr(model, 'device', getattr(real_model, 'device', 'cpu'))
-    model_dtype = getattr(real_model, 'dtype', torch.float32)
+def build_model_inputs(
+    model,
+    text_tokenizer,
+    visual_tokenizer,
+    prompt: str,
+    pil_image: Image.Image,
+    target_width=None,
+    target_height=None
+) -> tuple:
+    """
+    Build model inputs from prompt and image for Ovis-U1 raw model.
+    Handles both single and batch image inputs. Returns (input_ids, pixel_values, attention_mask, grid_thws, vae_pixel_values).
+    Raises ValueError for invalid input types or shape mismatches.
+    """
+    model_dtype = getattr(model, "dtype", None)
+    if model_dtype is None:
+        try:
+            model_dtype = next(model.parameters()).dtype
+        except Exception:
+            model_dtype = torch.float32
 
-    if pil_image is not None and target_width is not None and target_height is not None:
-        target_size = (int(target_width), int(target_height))
-        pil_image, vae_pixel_values, cond_img_ids = real_model.visual_generator.process_image_aspectratio(pil_image, target_size)
-        cond_img_ids[..., 0] = 1.0
-        vae_pixel_values = vae_pixel_values.unsqueeze(0).to(device=model_device, dtype=model_dtype)
-        width = pil_image.width
-        height = pil_image.height
-        resized_height, resized_width = visual_tokenizer.smart_resize(height, width, max_pixels=visual_tokenizer.image_processor.min_pixels)
-        pil_image = pil_image.resize((resized_width, resized_height))
-    else:
-        vae_pixel_values = None
-
-    prompt, input_ids, pixel_values, grid_thws = real_model.preprocess_inputs(
-        prompt,
-        [pil_image],
+    # Handle batch or single image
+    is_batch = isinstance(pil_image, (list, tuple))
+    images = pil_image if is_batch else [pil_image]
+    batch_size = len(images)
+    vae_pixel_values = None
+    processed_images = []
+    vae_pixel_values_list = []
+    # Resize and process each image if needed
+    for img in images:
+        if img is not None and target_width is not None and target_height is not None:
+            target_size = (int(target_width), int(target_height))
+            img, vae_pixel, cond_img_ids = model.visual_generator.process_image_aspectratio(img, target_size)
+            cond_img_ids[..., 0] = 1.0
+            vae_pixel = vae_pixel.unsqueeze(0).to(device=model.device, dtype=model_dtype)
+            width = img.width
+            height = img.height
+            resized_height, resized_width = visual_tokenizer.smart_resize(height, width, max_pixels=visual_tokenizer.image_processor.min_pixels)
+            img = img.resize((resized_width, resized_height))
+            vae_pixel_values_list.append(vae_pixel)
+        else:
+            vae_pixel_values_list.append(None)
+        processed_images.append(img)
+    if any(v is not None for v in vae_pixel_values_list):
+        vae_pixel_values = torch.cat([v for v in vae_pixel_values_list if v is not None], dim=0)
+        vae_pixel_values = vae_pixel_values.to(dtype=model_dtype)
+    # Preprocess inputs
+    prompt_list = [prompt] * batch_size
+    prompt_out, input_ids, pixel_values, grid_thws = model.preprocess_inputs(
+        prompt_list if is_batch else prompt,
+        processed_images,
         generation_preface=None,
         return_labels=False,
         propagate_exception=False,
         multimodal_type='single_image',
         fix_sample_overall_length_navit=False
     )
-
     attention_mask = torch.ne(input_ids, text_tokenizer.pad_token_id)
-
-    input_ids = input_ids.unsqueeze(0).to(device=model_device)
-    attention_mask = attention_mask.unsqueeze(0).to(device=model_device)
-
+    input_ids = input_ids.unsqueeze(0) if input_ids.dim() == 1 else input_ids
+    input_ids = input_ids.to(device=model.device)
+    attention_mask = attention_mask.unsqueeze(0) if attention_mask.dim() == 1 else attention_mask
+    attention_mask = attention_mask.to(device=model.device)
     if pixel_values is not None:
         pixel_values = torch.cat([
-            pixel_values.to(device=visual_tokenizer.device, dtype=model_dtype)
+            pixel_values.to(device=visual_tokenizer.device, dtype=model_dtype) if pixel_values is not None else None
         ], dim=0)
     if grid_thws is not None:
         grid_thws = torch.cat([
-            grid_thws.to(device=visual_tokenizer.device, dtype=model_dtype)
+            grid_thws.to(device=visual_tokenizer.device) if grid_thws is not None else None
         ], dim=0)
-
     return input_ids, pixel_values, attention_mask, grid_thws, vae_pixel_values
 
 
-class OvisModelWrapper:
-    """Ultra-safe wrapper class for Ovis model."""
-    
-    def __init__(self, model):
-        self.model = None
-        self.text_tokenizer = None
-        self.visual_tokenizer = None
-        
-        try:
-            if model is None:
-                return
-            if not hasattr(model, 'get_text_tokenizer'):
-                return
-            if not hasattr(model, 'get_visual_tokenizer'):
-                return
-            self.model = model
-            try:
-                self.text_tokenizer = model.get_text_tokenizer()
-            except Exception:
-                return
-            try:
-                self.visual_tokenizer = model.get_visual_tokenizer()
-            except Exception:
-                return
-            if self.text_tokenizer is None or self.visual_tokenizer is None:
-                self.model = None
-        except Exception:
-            self.model = None
-    
-    def is_valid(self):
-        """Check if the wrapper has valid model components."""
-        try:
-            return (self.model is not None and 
-                    self.text_tokenizer is not None and 
-                    self.visual_tokenizer is not None)
-        except Exception:
-            return False
 
 
 # ComfyUI Node Classes
@@ -437,7 +440,7 @@ class OvisU1ModelLoader:
     DESCRIPTION = "Load Ovis-U1 multimodal model with automatic download"
 
     def load_model(self, model_repo_id: str, device: str, dtype: str, trust_remote_code: bool):
-        """Strict model loading with proper error handling."""
+        """Load and return the Ovis-U1 model (raw model, not wrapper)."""
         try:
             if not TRANSFORMERS_AVAILABLE:
                 raise ImportError("transformers library required. Install: pip install transformers")
@@ -463,10 +466,7 @@ class OvisU1ModelLoader:
             )
             if model is None:
                 raise Exception("Model loading returned None")
-            wrapped_model = OvisModelWrapper(model)
-            if not wrapped_model.is_valid():
-                raise Exception("Model wrapper validation failed - model is not compatible")
-            return (wrapped_model,)
+            return (model,)
         except ImportError as e:
             error_msg = f"Import error: {str(e)}"
             raise Exception(error_msg) from e
@@ -505,25 +505,22 @@ class OvisU1TextToImage:
     
     def text_to_image(self, model, prompt, width, height, steps, txt_cfg, seed):
         """Generate an image from text prompt using Ovis-U1 model."""
-        # Strict model validation
         if model is None:
             raise Exception("Model is None. Please load the model first.")
-        if not hasattr(model, 'is_valid') or not model.is_valid():
-            raise Exception("Model is not loaded or invalid. Please load the model first.")
-        if not hasattr(model, 'model') or model.model is None:
-            raise Exception("Model wrapper contains no actual model. Please reload the model.")
-        
         try:
+            text_tokenizer, visual_tokenizer = get_ovis_tokenizers(model)
             if seed == -1:
                 seed = random.randint(0, 2**31 - 1)
             set_seed(seed)
             width = max(64, (width // 32) * 32)
             height = max(64, (height // 32) * 32)
-            ovis_model = model.model
-            text_tokenizer = model.text_tokenizer
-            visual_tokenizer = model.visual_tokenizer
-            if text_tokenizer is None or visual_tokenizer is None:
-                raise Exception("Model tokenizers are None. Model may not be properly loaded.")
+            model_dtype = getattr(model, "dtype", None)
+            if model_dtype is None:
+                try:
+                    model_dtype = next(model.parameters()).dtype
+                except Exception:
+                    model_dtype = torch.float32
+            print("model dtype: ", model_dtype)
             gen_kwargs = {
                 "max_new_tokens": 1024,
                 "do_sample": False,
@@ -539,21 +536,35 @@ class OvisU1TextToImage:
             }
             uncond_image = create_blank_image(width, height)
             uncond_prompt = "<image>\nGenerate an image."
-            input_ids, pixel_values, attention_mask, grid_thws, _ = build_model_inputs(
-                ovis_model, text_tokenizer, visual_tokenizer, uncond_prompt, uncond_image, width, height)
+            input_ids_uncond, pixel_values_uncond, attention_mask_uncond, grid_thws_uncond, _ = build_model_inputs(
+                model, text_tokenizer, visual_tokenizer, uncond_prompt, uncond_image, width, height)
+
             with torch.inference_mode():
-                no_both_cond = ovis_model.generate_condition(
-                    input_ids, pixel_values=pixel_values, attention_mask=attention_mask, 
-                    grid_thws=grid_thws, **gen_kwargs)
+                no_both_cond = model.generate_condition(
+                    input_ids_uncond, pixel_values=pixel_values_uncond, attention_mask=attention_mask_uncond, 
+                    grid_thws=grid_thws_uncond, **gen_kwargs)
+
             full_prompt = f"<image>\nDescribe the image by detailing the color, shape, size, texture, quantity, text, and spatial relationships of the objects: {prompt}"
-            input_ids, pixel_values, attention_mask, grid_thws, vae_pixel_values = build_model_inputs(
-                ovis_model, text_tokenizer, visual_tokenizer, full_prompt, uncond_image, width, height)
+            input_ids_cond, pixel_values_cond, attention_mask_cond, grid_thws_cond, vae_pixel_values_cond = build_model_inputs(
+                model, text_tokenizer, visual_tokenizer, full_prompt, uncond_image, width, height)
+
+            if pixel_values_cond is not None:
+                pixel_values_cond = pixel_values_cond.to(dtype=model_dtype)
+            if grid_thws_cond is not None:
+                grid_thws_cond = grid_thws_cond.to(dtype=model_dtype)
+            if vae_pixel_values_cond is not None:
+                 vae_pixel_values_cond = vae_pixel_values_cond.to(dtype=model_dtype)
+            if attention_mask_cond is not None:
+                attention_mask_cond = attention_mask_cond.to(dtype=model_dtype) if hasattr(attention_mask_cond, 'to') else attention_mask_cond
+            if input_ids_cond is not None:
+                input_ids_cond = input_ids_cond.to(dtype=model_dtype) if hasattr(input_ids_cond, 'to') else input_ids_cond
+
             with torch.inference_mode():
-                cond = ovis_model.generate_condition(
-                    input_ids, pixel_values=pixel_values, attention_mask=attention_mask, 
-                    grid_thws=grid_thws, **gen_kwargs)
-                cond["vae_pixel_values"] = vae_pixel_values
-                images = ovis_model.generate_img(
+                cond = model.generate_condition(
+                    input_ids_cond, pixel_values=pixel_values_cond, attention_mask=attention_mask_cond, 
+                    grid_thws=grid_thws_cond, **gen_kwargs)
+                cond["vae_pixel_values"] = vae_pixel_values_cond
+                images = model.generate_img(
                     cond=cond, no_both_cond=no_both_cond, no_txt_cond=None, **gen_kwargs)
             comfy_image = pil_to_comfy(images[0])
             return (comfy_image,)
@@ -583,21 +594,11 @@ class OvisU1ImageToText:
 
     def image_to_text(self, model, image, prompt, max_new_tokens):
         """Generate text description from image using Ovis-U1 model."""
-        # Strict model validation
         if model is None:
             raise Exception("Model is None. Please load the model first.")
-        if not hasattr(model, 'is_valid') or not model.is_valid():
-            raise Exception("Model is not loaded or invalid. Please load the model first.")
-        if not hasattr(model, 'model') or model.model is None:
-            raise Exception("Model wrapper contains no actual model. Please reload the model.")
-
         try:
+            text_tokenizer, visual_tokenizer = get_ovis_tokenizers(model)
             pil_image = comfy_to_pil(image)
-            ovis_model = model.model
-            text_tokenizer = model.text_tokenizer
-            visual_tokenizer = model.visual_tokenizer
-            if text_tokenizer is None or visual_tokenizer is None:
-                raise Exception("Model tokenizers are None. Model may not be properly loaded.")
             gen_kwargs = {
                 "max_new_tokens": max_new_tokens,
                 "do_sample": False,
@@ -607,9 +608,9 @@ class OvisU1ImageToText:
             }
             full_prompt = f"<image>\n{prompt}"
             input_ids, pixel_values, attention_mask, grid_thws = build_model_inputs(
-                ovis_model, text_tokenizer, visual_tokenizer, full_prompt, pil_image)[:4]
+                model, text_tokenizer, visual_tokenizer, full_prompt, pil_image)[:4]
             with torch.inference_mode():
-                output_ids = ovis_model.generate(
+                output_ids = model.generate(
                     input_ids, pixel_values=pixel_values, attention_mask=attention_mask, 
                     grid_thws=grid_thws, **gen_kwargs)[0]
                 gen_text = text_tokenizer.decode(output_ids, skip_special_tokens=True)
@@ -643,29 +644,19 @@ class OvisU1ImageEdit:
     
     def edit_image(self, model, image, prompt, steps, txt_cfg, img_cfg, seed):
         """Edit an image based on text prompt using Ovis-U1 model."""
-        # Strict model validation
         if model is None:
             raise Exception("Model is None. Please load the model first.")
-        if not hasattr(model, 'is_valid') or not model.is_valid():
-            raise Exception("Model is not loaded or invalid. Please load the model first.")
-        if not hasattr(model, 'model') or model.model is None:
-            raise Exception("Model wrapper contains no actual model. Please reload the model.")
-        
         try:
+            text_tokenizer, visual_tokenizer = get_ovis_tokenizers(model)
             if seed == -1:
                 seed = random.randint(0, 2**31 - 1)
             set_seed(seed)
             input_img = comfy_to_pil(image)
-            ovis_model = model.model
-            text_tokenizer = model.text_tokenizer
-            visual_tokenizer = model.visual_tokenizer
-            if text_tokenizer is None or visual_tokenizer is None:
-                raise Exception("Model tokenizers are None. Model may not be properly loaded.")
             width, height = input_img.size
             height, width = visual_tokenizer.smart_resize(height, width, factor=32)
             full_prompt = f"<image>\n{prompt}"
             prompt, input_ids, pixel_values, grid_thws, vae_pixel_values = build_model_inputs(
-                ovis_model, text_tokenizer, visual_tokenizer, full_prompt, input_img, width, height)
+                model, text_tokenizer, visual_tokenizer, full_prompt, input_img, width, height)
             attention_mask = torch.ne(input_ids, text_tokenizer.pad_token_id)
             input_ids = input_ids.unsqueeze(0).to(device=model.device)
             attention_mask = attention_mask.unsqueeze(0).to(device=model.device)
@@ -691,7 +682,7 @@ class OvisU1ImageEdit:
                 "txt_cfg": txt_cfg,
             }
             with torch.inference_mode():
-                output = ovis_model.generate(
+                output = model.generate(
                     input_ids, pixel_values=pixel_values, attention_mask=attention_mask,
                     grid_thws=grid_thws, **gen_kwargs)
                 images = output.images
