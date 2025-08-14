@@ -43,7 +43,7 @@ Generate high-quality images from natural language prompts. This workflow shows 
 Perform captioning, visual question answering, and scene understanding. Suitable for extracting structured descriptions from images.
 
 ### Image Editing Workflow
-![Image Edit workflow](example_workflows/ovis_u1_image_editting.png)
+![Image Edit workflow](example_workflows/ovis_u1_image_editing.png)
 Instruction-guided image editing. The node implements the official three-step conditional flow (unconditional, image-only, final conditioned) to produce high-quality edits.
 
 ## License
