@@ -1,0 +1,219 @@
+{
+  "id": "41248f08-f5ce-4161-bc02-9654ca387516",
+  "revision": 0,
+  "last_node_id": 4,
+  "last_link_id": 3,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "OvisU1ModelLoader",
+      "pos": [
+        417.7146301269531,
+        234.30279541015625
+      ],
+      "size": [
+        270,
+        130
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "label": "OVIS_MODEL",
+          "name": "OVIS_MODEL",
+          "type": "OVIS_MODEL",
+          "links": [
+            1
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "neverbiasu/ComfyUI-Ovis-U1",
+        "ver": "0fa5e533926976ee8e90315f3e2dc23a3fa2d5bf",
+        "Node name for S&R": "OvisU1ModelLoader"
+      },
+      "widgets_values": [
+        "AIDC-AI/Ovis-U1-3B",
+        "auto",
+        "bfloat16",
+        true
+      ]
+    },
+    {
+      "id": 3,
+      "type": "LoadImage",
+      "pos": [
+        383.6777648925781,
+        441.4446716308594
+      ],
+      "size": [
+        270,
+        314
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "label": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            2
+          ]
+        },
+        {
+          "label": "MASK",
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.43",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "001_161_984_4k_nedko-ivanov-greta-macabre-digital-portrait-by-vannenov-d7nace2_00.png",
+        "image"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "OvisU1ImageToText",
+      "pos": [
+        814.9409790039062,
+        236.63941955566406
+      ],
+      "size": [
+        400,
+        200
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "model",
+          "name": "model",
+          "type": "OVIS_MODEL",
+          "link": 1
+        },
+        {
+          "label": "image",
+          "name": "image",
+          "type": "IMAGE",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "label": "STRING",
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            3
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "neverbiasu/ComfyUI-Ovis-U1",
+        "ver": "0fa5e533926976ee8e90315f3e2dc23a3fa2d5bf",
+        "Node name for S&R": "OvisU1ImageToText"
+      },
+      "widgets_values": [
+        "What do you see in this image?",
+        4096,
+        [
+          false,
+          true
+        ]
+      ]
+    },
+    {
+      "id": 4,
+      "type": "ShowText|pysssss",
+      "pos": [
+        1267.506591796875,
+        249.14036560058594
+      ],
+      "size": [
+        140,
+        26
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "text",
+          "name": "text",
+          "type": "STRING",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "label": "STRING",
+          "name": "STRING",
+          "shape": 6,
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-custom-scripts",
+        "ver": "1.2.5",
+        "Node name for S&R": "ShowText|pysssss"
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "OVIS_MODEL"
+    ],
+    [
+      2,
+      3,
+      0,
+      2,
+      1,
+      "IMAGE"
+    ],
+    [
+      3,
+      2,
+      0,
+      4,
+      0,
+      "STRING"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.7247295000000004,
+      "offset": [
+        541.2296401351763,
+        374.42863704108913
+      ]
+    },
+    "frontendVersion": "1.23.4",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}
