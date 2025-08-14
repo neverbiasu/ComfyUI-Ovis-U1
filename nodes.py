@@ -377,7 +377,8 @@ def build_model_inputs(
             target_size = (int(target_width), int(target_height))
             img, vae_pixel, cond_img_ids = model.visual_generator.process_image_aspectratio(img, target_size)
             cond_img_ids[..., 0] = 1.0
-            vae_pixel = vae_pixel.unsqueeze(0).to(device=model.device, dtype=model_dtype)
+            # Keep VAE pixels in their native dtype (usually float32), only move device
+            vae_pixel = vae_pixel.unsqueeze(0).to(device=visual_tokenizer.device)
             width = img.width
             height = img.height
             resized_height, resized_width = visual_tokenizer.smart_resize(height, width, max_pixels=visual_tokenizer.image_processor.min_pixels)
@@ -388,7 +389,8 @@ def build_model_inputs(
         processed_images.append(img)
     if any(v is not None for v in vae_pixel_values_list):
         vae_pixel_values = torch.cat([v for v in vae_pixel_values_list if v is not None], dim=0)
-        vae_pixel_values = vae_pixel_values.to(dtype=model_dtype)
+        # Keep VAE pixel values on visual_tokenizer device (following original pattern)
+        vae_pixel_values = vae_pixel_values.to(device=visual_tokenizer.device)
     # Preprocess inputs
     prompt_list = [prompt] * batch_size
     prompt_out, input_ids, pixel_values, grid_thws = model.preprocess_inputs(
@@ -406,19 +408,16 @@ def build_model_inputs(
     attention_mask = attention_mask.unsqueeze(0) if attention_mask.dim() == 1 else attention_mask
     attention_mask = attention_mask.to(device=model.device)
     if pixel_values is not None:
-        pixel_values = torch.cat([
-            pixel_values.to(device=visual_tokenizer.device, dtype=model_dtype) if pixel_values is not None else None
-        ], dim=0)
+        # Use visual_tokenizer.device and cast to model_dtype (following original test pattern)
+        pixel_values = pixel_values.to(device=visual_tokenizer.device, dtype=model_dtype)
     if grid_thws is not None:
-        grid_thws = torch.cat([
-            grid_thws.to(device=visual_tokenizer.device) if grid_thws is not None else None
-        ], dim=0)
+        # Move grid_thws to visual_tokenizer.device, keep as integer type
+        grid_thws = grid_thws.to(device=visual_tokenizer.device)
+        if torch.is_floating_point(grid_thws):
+            # Some preprocessing may produce float tensors; convert them to long for sizes/indices.
+            grid_thws = grid_thws.long()
     return input_ids, pixel_values, attention_mask, grid_thws, vae_pixel_values
 
-
-
-
-# ComfyUI Node Classes
 
 class OvisU1ModelLoader:
     """ComfyUI node for loading Ovis-U1 multimodal model."""
@@ -466,6 +465,15 @@ class OvisU1ModelLoader:
             )
             if model is None:
                 raise Exception("Model loading returned None")
+            
+            # Ensure all model parameters are converted to the target dtype (like in original test)
+            if torch_dtype == torch.bfloat16:
+                model = model.to(torch.bfloat16)
+            elif torch_dtype == torch.float16:
+                model = model.to(torch.float16)
+            elif torch_dtype == torch.float32:
+                model = model.to(torch.float32)
+                
             return (model,)
         except ImportError as e:
             error_msg = f"Import error: {str(e)}"
@@ -548,17 +556,10 @@ class OvisU1TextToImage:
             input_ids_cond, pixel_values_cond, attention_mask_cond, grid_thws_cond, vae_pixel_values_cond = build_model_inputs(
                 model, text_tokenizer, visual_tokenizer, full_prompt, uncond_image, width, height)
 
-            if pixel_values_cond is not None:
-                pixel_values_cond = pixel_values_cond.to(dtype=model_dtype)
-            if grid_thws_cond is not None:
-                grid_thws_cond = grid_thws_cond.to(dtype=model_dtype)
-            if vae_pixel_values_cond is not None:
-                 vae_pixel_values_cond = vae_pixel_values_cond.to(dtype=model_dtype)
-            if attention_mask_cond is not None:
-                attention_mask_cond = attention_mask_cond.to(dtype=model_dtype) if hasattr(attention_mask_cond, 'to') else attention_mask_cond
-            if input_ids_cond is not None:
-                input_ids_cond = input_ids_cond.to(dtype=model_dtype) if hasattr(input_ids_cond, 'to') else input_ids_cond
-
+            # build_model_inputs already moves image tensors (pixel_values/vae_pixel_values) to model.device
+            # and casts to the model dtype. Avoid re-casting other tensors (input_ids, attention_mask, grid_thws)
+            # which must remain integer/boolean types where applicable.
+ 
             with torch.inference_mode():
                 cond = model.generate_condition(
                     input_ids_cond, pixel_values=pixel_values_cond, attention_mask=attention_mask_cond, 
@@ -655,19 +656,19 @@ class OvisU1ImageEdit:
             width, height = input_img.size
             height, width = visual_tokenizer.smart_resize(height, width, factor=32)
             full_prompt = f"<image>\n{prompt}"
-            prompt, input_ids, pixel_values, grid_thws, vae_pixel_values = build_model_inputs(
+            # build_model_inputs returns (input_ids, pixel_values, attention_mask, grid_thws, vae_pixel_values)
+            input_ids, pixel_values, attention_mask, grid_thws, vae_pixel_values = build_model_inputs(
                 model, text_tokenizer, visual_tokenizer, full_prompt, input_img, width, height)
-            attention_mask = torch.ne(input_ids, text_tokenizer.pad_token_id)
-            input_ids = input_ids.unsqueeze(0).to(device=model.device)
-            attention_mask = attention_mask.unsqueeze(0).to(device=model.device)
+            # Ensure input ids and attention mask are on model device (build_model_inputs already did this,
+            # but enforce to be safe without changing shapes)
+            input_ids = input_ids.to(device=model.device)
+            attention_mask = attention_mask.to(device=model.device)
             if pixel_values is not None:
-                pixel_values = torch.cat([
-                    pixel_values.to(device=visual_tokenizer.device, dtype=torch.bfloat16)
-                ], dim=0)
+                pixel_values = pixel_values.to(device=visual_tokenizer.device, dtype=getattr(model, "dtype", torch.float32))
             if grid_thws is not None:
-                grid_thws = torch.cat([
-                    grid_thws.to(device=visual_tokenizer.device)
-                ], dim=0)
+                grid_thws = grid_thws.to(device=visual_tokenizer.device)
+                if torch.is_floating_point(grid_thws):
+                    grid_thws = grid_thws.long()
             gen_kwargs = {
                 "max_new_tokens": 1024,
                 "do_sample": False,
