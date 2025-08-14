@@ -682,11 +682,32 @@ class OvisU1ImageEdit:
                 "img_cfg": img_cfg,
                 "txt_cfg": txt_cfg,
             }
+            
+            # Step 1: Generate no_both_cond (unconditional generation)
+            uncond_image = create_blank_image(width, height)
+            uncond_prompt = "<image>\nGenerate an image."
+            input_ids_uncond, pixel_values_uncond, attention_mask_uncond, grid_thws_uncond, _ = build_model_inputs(
+                model, text_tokenizer, visual_tokenizer, uncond_prompt, uncond_image, width, height)
+            
             with torch.inference_mode():
-                output = model.generate(
-                    input_ids, pixel_values=pixel_values, attention_mask=attention_mask,
+                no_both_cond = model.generate_condition(
+                    input_ids_uncond, pixel_values=pixel_values_uncond, attention_mask=attention_mask_uncond, 
+                    grid_thws=grid_thws_uncond, **gen_kwargs)
+            
+            # Step 2: Generate no_txt_cond (image-only condition)
+            with torch.inference_mode():
+                no_txt_cond = model.generate_condition(
+                    input_ids_uncond, pixel_values=pixel_values, attention_mask=attention_mask_uncond, 
                     grid_thws=grid_thws, **gen_kwargs)
-                images = output.images
+            
+            # Step 3: Generate final conditioned output
+            with torch.inference_mode():
+                cond = model.generate_condition(
+                    input_ids, pixel_values=pixel_values, attention_mask=attention_mask, 
+                    grid_thws=grid_thws, **gen_kwargs)
+                cond["vae_pixel_values"] = vae_pixel_values
+                images = model.generate_img(
+                    cond=cond, no_both_cond=no_both_cond, no_txt_cond=no_txt_cond, **gen_kwargs)
                 if len(images) == 0:
                     raise Exception("No images found in generation output")
                 gen_image = images[0]
