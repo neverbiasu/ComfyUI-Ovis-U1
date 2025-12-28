@@ -72,6 +72,7 @@ def _check_required_files(model_path: str) -> List[str]:
             if file_size == 0:
                 missing_required.append(f"{file} (empty)")
                 continue
+        # Explicitly catch PermissionError for clarity, though it's a subclass of OSError
         except (OSError, PermissionError) as e:
             missing_required.append(f"{file} (access error: {e})")
             continue
