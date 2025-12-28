@@ -72,7 +72,7 @@ def _check_required_files(model_path: str) -> List[str]:
             if file_size == 0:
                 missing_required.append(f"{file} (empty)")
                 continue
-        except OSError as e:
+        except (OSError, PermissionError) as e:
             missing_required.append(f"{file} (access error: {e})")
             continue
     return missing_required
@@ -148,7 +148,9 @@ def download_model(repo_name: str, local_path: str, token: str = None) -> bool:
         success, _, _ = check_model_files_safe(local_path)
         return success
 
-    except (KeyboardInterrupt, Exception):
+    except KeyboardInterrupt:
+        raise
+    except Exception:
         return False
 
 
@@ -311,9 +313,9 @@ def get_ovis_tokenizers(model):
     Raises an exception if not available.
     """
     if model is None:
-        raise ValueError(MODEL_NOT_LOADED_MSG)
+        raise RuntimeError(MODEL_NOT_LOADED_MSG)
     if not hasattr(model, 'get_text_tokenizer') or not hasattr(model, 'get_visual_tokenizer'):
-        raise ValueError("Model does not provide tokenizer accessors. Please check model version.")
+        raise RuntimeError("Model does not provide tokenizer accessors. Please check model version.")
     text_tokenizer = model.get_text_tokenizer()
     visual_tokenizer = model.get_visual_tokenizer()
     if text_tokenizer is None or visual_tokenizer is None:
@@ -496,7 +498,7 @@ class OvisU1TextToImage:
     def text_to_image(self, model, prompt, width, height, steps, txt_cfg, seed):
         """Generate an image from text prompt using Ovis-U1 model."""
         if model is None:
-            raise ValueError(MODEL_NOT_LOADED_MSG)
+            raise RuntimeError(MODEL_NOT_LOADED_MSG)
         try:
             text_tokenizer, visual_tokenizer = get_ovis_tokenizers(model)
             if seed == -1:
@@ -575,7 +577,7 @@ class OvisU1ImageToText:
     def image_to_text(self, model, image, prompt, max_new_tokens):
         """Generate text description from image using Ovis-U1 model."""
         if model is None:
-            raise ValueError(MODEL_NOT_LOADED_MSG)
+            raise RuntimeError(MODEL_NOT_LOADED_MSG)
         try:
             text_tokenizer, visual_tokenizer = get_ovis_tokenizers(model)
             pil_image = comfy_to_pil(image)
@@ -626,7 +628,7 @@ class OvisU1ImageEdit:
     def edit_image(self, model, image, prompt, steps, txt_cfg, img_cfg, seed):
         """Edit an image based on text prompt using Ovis-U1 model."""
         if model is None:
-            raise ValueError(MODEL_NOT_LOADED_MSG)
+            raise RuntimeError(MODEL_NOT_LOADED_MSG)
         try:
             text_tokenizer, visual_tokenizer = get_ovis_tokenizers(model)
             if seed == -1:
