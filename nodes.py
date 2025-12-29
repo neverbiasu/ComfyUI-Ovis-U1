@@ -99,7 +99,7 @@ def _check_weight_files(model_path: str) -> Tuple[bool, List[str]]:
                  else:
                      if not weight_found:
                          missing_weights.append(f"{weight_file} (too small)")
-             except OSError as e:
+             except (OSError, PermissionError) as e:
                  if not weight_found:
                      missing_weights.append(f"{weight_file} (access error: {e})")
                  continue
@@ -151,7 +151,8 @@ def download_model(repo_name: str, local_path: str, token: str = None) -> bool:
 
     except KeyboardInterrupt:
         raise
-    except Exception:
+    except Exception as e:
+        print(f"Download error: {e}")
         return False
 
 
