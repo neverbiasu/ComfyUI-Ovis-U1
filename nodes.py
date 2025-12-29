@@ -72,6 +72,7 @@ def _check_required_files(model_path: str) -> List[str]:
             if file_size == 0:
                 missing_required.append(f"{file} (empty)")
                 continue
+        # Explicitly catch PermissionError for clarity, though it's a subclass of OSError
         except (OSError, PermissionError) as e:
             missing_required.append(f"{file} (access error: {e})")
             continue
@@ -316,7 +317,7 @@ def get_ovis_tokenizers(model):
     if model is None:
         raise RuntimeError(MODEL_NOT_LOADED_MSG)
     if not hasattr(model, 'get_text_tokenizer') or not hasattr(model, 'get_visual_tokenizer'):
-        raise ValueError("Model does not provide tokenizer accessors. Please check model version.")
+        raise RuntimeError("Model does not provide tokenizer accessors. Please check model version.")
     text_tokenizer = model.get_text_tokenizer()
     visual_tokenizer = model.get_visual_tokenizer()
     if text_tokenizer is None or visual_tokenizer is None:
